@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+	new_version="0.0.1-1"
+	occurrences=/usr/sbin/dkms status | grep "xtrx" | grep "${new_version}" | wc -l
+	if [ ! occurrences > 0 ];
+	then
+		/usr/sbin/dkms add -m xtrx -v ${new_version}
+	fi
+	/usr/sbin/dkms build -m xtrx -v ${new_version}
+	/usr/sbin/dkms install -m xtrx -v ${new_version}
+fi
+
+#DEBHELPER#
