@@ -734,6 +734,7 @@ static ssize_t xtrxfd_read(struct file *filp, char __user *buf, size_t count,
 {
 	struct xtrx_dev *xtrxdev = filp->private_data;
 	int i;
+	int timeout = 2 * HZ;
 
 	if (!xtrxdev)
 		return -ENODEV;
@@ -741,6 +742,11 @@ static ssize_t xtrxfd_read(struct file *filp, char __user *buf, size_t count,
 	if (!f_pos)
 		return -EINVAL;
 
+	if (count > 1) {
+		timeout = HZ * count / 1000;
+		if (timeout < 1)
+			timeout = 1;
+	}
 
 	switch (*f_pos) {
 	case XTRX_KERN_MMAP_1PPS_IRQS:
@@ -769,12 +775,23 @@ static ssize_t xtrxfd_read(struct file *filp, char __user *buf, size_t count,
 		i = wait_event_interruptible_timeout(
 			xtrxdev->queue_rx,
 			atomic_read(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_RX_IRQS) != 0,
-			2 * HZ);
+			timeout/*2 * HZ*/);
 
 		if (!i) {
 			return -EAGAIN;
 		}
 		return atomic_xchg(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_RX_IRQS, 0);
+
+	case XTRX_KERN_MMAP_TX_IRQS:
+		i = wait_event_interruptible_timeout(
+			xtrxdev->queue_tx,
+			atomic_read(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_TX_IRQS) != 0,
+			timeout/*2 * HZ*/);
+
+		if (!i) {
+			return -EAGAIN;
+		}
+		return atomic_xchg(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_TX_IRQS, 0);
 	}
 
 
@@ -863,7 +880,7 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		if ((vma->vm_end - vma->vm_start) != (1 << PAGE_SHIFT)) {
 			return -EINVAL;
 		}
-
+		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 		vma->vm_flags |= VM_LOCKED;
 
 		if (remap_pfn_range(vma, vma->vm_start,
@@ -875,7 +892,7 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		vma->vm_ops = &xtrxfd_remap_vm_ops;
 		xtrxfd_vma_open(vma);
 		return 0;
-	} else if (vma->vm_pgoff == 0 || vma->vm_pgoff == XTRX_MMAP_TX_BUF_OFF >> PAGE_SHIFT) {
+	} else if (vma->vm_pgoff == 0 || vma->vm_pgoff == (XTRX_MMAP_TX_BUF_OFF >> PAGE_SHIFT)) {
 		resource_size_t addr;
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 		vma->vm_flags |= VM_IO;
@@ -900,7 +917,7 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		unsigned long pfn, off;
 		unsigned i;
 		int ret;
-		struct xtrx_dmabuf_nfo *pbufs = (vma->vm_pgoff == XTRX_MMAP_RX_OFF >> PAGE_SHIFT) ? xtrxdev->buf_rx : xtrxdev->buf_tx;
+		struct xtrx_dmabuf_nfo *pbufs = (vma->vm_pgoff == (XTRX_MMAP_RX_OFF >> PAGE_SHIFT)) ? xtrxdev->buf_rx : xtrxdev->buf_tx;
 
 		printk(KERN_NOTICE PFX "mmap() call: VMA=%p vma->vm_pgoff=%lu\n", vma, vma->vm_pgoff);
 
@@ -909,7 +926,8 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 			return -EINVAL;
 		}
 
-		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+		//vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+		vma->vm_flags |= VM_LOCKED;
 
 		for (i = 0, off = 0; i < BUFS; ++i, off += BUF_SIZE) {
 			pfn = page_to_pfn(virt_to_page(pbufs[i].virt));
@@ -967,6 +985,10 @@ static int xtrx_probe(struct pci_dev *pdev,
 			"aborting.\n");
 		return err;
 	}
+
+	/* Reconfigure MaxReadReq to 2KB */
+	pcie_capability_clear_and_set_word(pdev, PCI_EXP_DEVCTL,
+					   PCI_EXP_DEVCTL_READRQ, 0x4000);
 
 	pci_set_master(pdev);
 
