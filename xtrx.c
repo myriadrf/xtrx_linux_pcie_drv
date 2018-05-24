@@ -38,6 +38,7 @@
 #include <linux/device.h>
 #include <linux/time.h>
 #include <linux/pps_kernel.h>
+#include <linux/version.h>
 #include <asm/page.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -1058,7 +1059,11 @@ static int xtrx_probe(struct pci_dev *pdev,
 	init_waitqueue_head(&xtrxdev->queue_other);
 	init_waitqueue_head(&xtrxdev->onepps_ctrl);
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4,11,0)
 	err = pci_enable_msi_range(pdev, XTRX_MSI_COUNT, XTRX_MSI_COUNT);
+#else
+	err = pci_alloc_irq_vectors(pdev, XTRX_MSI_COUNT, XTRX_MSI_COUNT, PCI_IRQ_MSI);
+#endif
 	if (err == XTRX_MSI_COUNT) {
 		xtrxdev->inttype = XTRX_MSI_4;
 
