@@ -68,6 +68,7 @@ struct xtrx_dev;
 enum xtrx_uart_types {
 	XTRX_UART_GPS,        /**< UART device for GPS NMEA */
 	XTRX_UART_SIM,        /**< UART device for T0 smartcard */
+	XTRX_UART_NUM,
 };
 
 
@@ -98,9 +99,9 @@ struct xtrx_dev {
 	xtrx_interrupt_type_t inttype;
 
 	wait_queue_head_t queue_ctrl;  /* wait queue ctrl */
+	wait_queue_head_t queue_i2c;   /* wait queue i2c */
 	wait_queue_head_t queue_tx;    /* wait queue tx */
 	wait_queue_head_t queue_rx;    /* wait queue rx */
-	wait_queue_head_t queue_other; /* wait queue other */
 	wait_queue_head_t onepps_ctrl;
 
 	struct pci_dev *pdev;     /* pci device */
@@ -118,7 +119,6 @@ struct xtrx_dev {
 	struct uart_port port_gps;
 	struct uart_port port_sim;
 
-	struct timer_list uart_timer;
 
 	unsigned gps_ctrl_state;
 	unsigned sim_ctrl_state;
@@ -162,9 +162,9 @@ static unsigned int xtrx_uart_tx_empty(struct uart_port *port)
 
 static struct xtrx_dev *xtrx_dev_from_uart_port(struct uart_port *port)
 {
-	if (port->line == XTRX_UART_LINE_SIM) {
+	if (port->line % XTRX_UART_NUM == XTRX_UART_LINE_SIM) {
 		return (struct xtrx_dev *)((unsigned long)port - offsetof(struct xtrx_dev, port_sim));
-	} else if (port->line == XTRX_UART_LINE_GPS) {
+	} else if (port->line % XTRX_UART_NUM == XTRX_UART_LINE_GPS) {
 		return (struct xtrx_dev *)((unsigned long)port - offsetof(struct xtrx_dev, port_gps));
 	} else {
 		return NULL;
@@ -174,7 +174,7 @@ static struct xtrx_dev *xtrx_dev_from_uart_port(struct uart_port *port)
 static void xtrx_uart_set_mctrl(struct uart_port *port, unsigned int mctrl)
 {
 	struct xtrx_dev *dev;
-	if (port->line == XTRX_UART_LINE_SIM) {
+	if (port->line % XTRX_UART_NUM == XTRX_UART_LINE_SIM) {
 		dev = xtrx_dev_from_uart_port(port);
 		if (!(mctrl & TIOCM_RTS)) {
 		    dev->sim_ctrl_state |= WR_SIM_CTRL_RESET;
@@ -223,7 +223,7 @@ static int xtrx_uart_startup(struct uart_port *port)
 {
 	unsigned long flags;
 	struct xtrx_dev *dev = xtrx_dev_from_uart_port(port);
-	if (port->line == XTRX_UART_LINE_SIM) {
+	if (port->line % XTRX_UART_NUM == XTRX_UART_LINE_SIM) {
 		spin_lock_irqsave(&port->lock, flags);
 
 		if (dev->sim_ctrl_state & WR_SIM_CTRL_ENABLE) {
@@ -257,7 +257,7 @@ static void xtrx_uart_shutdown(struct uart_port *port)
 	unsigned long flags;
 
 	struct xtrx_dev *dev = xtrx_dev_from_uart_port(port);
-	if (port->line == XTRX_UART_LINE_SIM) {
+	if (port->line % XTRX_UART_NUM == XTRX_UART_LINE_SIM) {
 		spin_lock_irqsave(&port->lock, flags);
 
 		dev->sim_ctrl_state = 0;
@@ -328,7 +328,7 @@ void xtrx_uart_do_rx(struct uart_port *port, unsigned* fifo_used)
 	max_count = 33;
 	do {
 		unsigned int c;
-		c = xtrx_readl(dev, (port->line == XTRX_UART_LINE_GPS) ?
+		c = xtrx_readl(dev, (port->line % XTRX_UART_NUM == XTRX_UART_LINE_GPS) ?
 					GP_PORT_RD_UART_RX : GP_PORT_RD_SIM_RX);
 
 		if (fifo_used)
@@ -362,7 +362,7 @@ static void xtrx_uart_do_tx(struct uart_port *port, unsigned fifo_used)
 	struct xtrx_dev *dev = xtrx_dev_from_uart_port(port);
 
 	if (port->x_char) {
-		xtrx_writel(dev, (port->line == XTRX_UART_LINE_GPS) ?
+		xtrx_writel(dev, (port->line % XTRX_UART_NUM == XTRX_UART_LINE_GPS) ?
 				    GP_PORT_WR_UART_TX : GP_PORT_WR_SIM_TX,
 			    port->x_char);
 		port->icount.tx++;
@@ -385,7 +385,7 @@ static void xtrx_uart_do_tx(struct uart_port *port, unsigned fifo_used)
 
 		c = xmit->buf[xmit->tail] & 0xff;
 		//printk(KERN_NOTICE PFX "Char: %x\n", c);
-		xtrx_writel(dev, (port->line == XTRX_UART_LINE_GPS) ?
+		xtrx_writel(dev, (port->line % XTRX_UART_NUM == XTRX_UART_LINE_GPS) ?
 				    GP_PORT_WR_UART_TX : GP_PORT_WR_SIM_TX, c);
 		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
 		port->icount.tx++;
@@ -405,35 +405,6 @@ txq_empty:
 	// TODO
 	return;
 }
-
-
-// 20ms timer
-#define XTRX_UART_DELAY_TIME ((HZ/100)+1)
-
-static void xtrx_uart_timer(unsigned long data)
-{
-	unsigned tx_fifo_used;
-	struct xtrx_dev* dev = (struct xtrx_dev*)data;
-
-	spin_lock(&dev->port_gps.lock);
-	if (dev->gps_ctrl_state) {
-		xtrx_uart_do_rx(&dev->port_gps, &tx_fifo_used);
-		xtrx_uart_do_tx(&dev->port_gps, tx_fifo_used);
-	}
-	spin_unlock(&dev->port_gps.lock);
-
-	spin_lock(&dev->port_sim.lock);
-	if (dev->sim_ctrl_state & WR_SIM_CTRL_ENABLE) {
-		xtrx_uart_do_rx(&dev->port_sim, &tx_fifo_used);
-		xtrx_uart_do_tx(&dev->port_sim, tx_fifo_used);
-	}
-	spin_unlock(&dev->port_sim.lock);
-
-	dev->uart_timer.expires = jiffies + XTRX_UART_DELAY_TIME;
-	add_timer(&dev->uart_timer);
-}
-
-
 
 static struct uart_ops xtrx_uart_ops = {
 	.tx_empty	= xtrx_uart_tx_empty,
@@ -464,13 +435,13 @@ static struct uart_driver xtrx_uart_driver = {
 	.dev_name	= "ttyXTRX",
 	.major		= TTY_XTRX_MAJOR,
 	.minor		= 64,
-	.nr		= 2,
+	.nr		= XTRX_UART_NUM * MAX_XTRX_DEVS,
 	.cons		= NULL,
 };
 
 
 // TTY functions
-static int xtrx_uart_init(struct xtrx_dev* dev)
+static int xtrx_uart_init(struct xtrx_dev* dev, unsigned xtrx_no)
 {
 	int ret;
 
@@ -483,7 +454,7 @@ static int xtrx_uart_init(struct xtrx_dev* dev)
 	dev->port_gps.dev = &dev->pdev->dev;
 	dev->port_gps.fifosize = 32;
 	dev->port_gps.uartclk = 9600*16;
-	dev->port_gps.line = XTRX_UART_LINE_GPS;
+	dev->port_gps.line = xtrx_no * XTRX_UART_NUM + XTRX_UART_LINE_GPS;
 
 	ret = uart_add_one_port(&xtrx_uart_driver, &dev->port_gps);
 	if (ret) {
@@ -500,7 +471,7 @@ static int xtrx_uart_init(struct xtrx_dev* dev)
 	dev->port_sim.dev = &dev->pdev->dev;
 	dev->port_sim.fifosize = 32;
 	dev->port_sim.uartclk = 9600*16;
-	dev->port_sim.line = XTRX_UART_LINE_SIM;
+	dev->port_sim.line = xtrx_no * XTRX_UART_NUM + XTRX_UART_LINE_SIM;
 
 	ret = uart_add_one_port(&xtrx_uart_driver, &dev->port_sim);
 	if (ret) {
@@ -510,21 +481,13 @@ static int xtrx_uart_init(struct xtrx_dev* dev)
 	}
 
 	dev->sim_ctrl_state = 0;
-
-	//init_timer(&dev->uart_timer);
-	dev->uart_timer.data = (unsigned long )dev;
-	dev->uart_timer.function = xtrx_uart_timer;
-	dev->uart_timer.expires = jiffies + XTRX_UART_DELAY_TIME;
-	//add_timer(&dev->uart_timer);
 	return 0;
 }
 
 static void xtrx_uart_deinit(struct xtrx_dev* dev)
 {
-	//del_timer(&dev->uart_timer);
 	uart_remove_one_port(&xtrx_uart_driver, &dev->port_gps);
 	uart_remove_one_port(&xtrx_uart_driver, &dev->port_sim);
-
 }
 
 // DMA functions
@@ -601,14 +564,17 @@ static void xtrx_interrupt_gpspps(struct xtrx_dev *xtrxdev)
 
 static void xtrx_process_l_interrupts(struct xtrx_dev *xtrxdev, uint32_t imask)
 {
-	if (imask & (1 << INT_L_1PPS)) {
-		xtrx_interrupt_gpspps(xtrxdev);
-
-		atomic_inc((atomic_t*)xtrxdev->shared_mmap + XTRX_KERN_MMAP_1PPS_IRQS);
-		wake_up_interruptible(&xtrxdev->onepps_ctrl);
+	if (imask & (1 << INT_RFIC0_SPI)) {
+		atomic_inc((atomic_t*)xtrxdev->shared_mmap + XTRX_KERN_MMAP_CTRL_IRQS);
+		wake_up_interruptible(&xtrxdev->queue_ctrl);
 	}
 
-	if (imask & (1 << INT_L_GPS_UART_RX)) {
+	if (imask & (1 << INT_I2C)) {
+		atomic_inc((atomic_t*)xtrxdev->shared_mmap + XTRX_KERN_MMAP_I2C_IRQS);
+		wake_up_interruptible(&xtrxdev->queue_i2c);
+	}
+
+	if (imask & (1 << INT_GPS_UART_RX)) {
 		// TODO tty or user notificatio
 		//atomic_inc((atomic_t*)xtrxdev->shared_mmap + XTRX_KERN_MMAP_GPS_RX_IRQS);
 		//wake_up_interruptible(&xtrxdev->uart_gps_rx);
@@ -622,7 +588,7 @@ static void xtrx_process_l_interrupts(struct xtrx_dev *xtrxdev, uint32_t imask)
 		spin_unlock(&xtrxdev->port_gps.lock);
 	}
 
-	if (imask & (1 << INT_L_SIM_UART_RX)) {
+	if (imask & (1 << INT_SIM_UART_RX)) {
 		// TODO tty or user notificatio
 		//atomic_inc((atomic_t*)xtrxdev->shared_mmap + XTRX_KERN_MMAP_SIM_RX_IRQS);
 		//wake_up_interruptible(&xtrxdev->uart_gps_rx);
@@ -637,11 +603,13 @@ static void xtrx_process_l_interrupts(struct xtrx_dev *xtrxdev, uint32_t imask)
 	}
 }
 
-static irqreturn_t xtrx_msi_irq_ctrl(int irq, void *data)
+static irqreturn_t xtrx_msi_irq_pps(int irq, void *data)
 {
 	struct xtrx_dev *xtrxdev = data;
-	atomic_inc((atomic_t*)xtrxdev->shared_mmap + XTRX_KERN_MMAP_CTRL_IRQS);
-	wake_up_interruptible(&xtrxdev->queue_ctrl);
+	xtrx_interrupt_gpspps(xtrxdev);
+
+	atomic_inc((atomic_t*)xtrxdev->shared_mmap + XTRX_KERN_MMAP_1PPS_IRQS);
+	wake_up_interruptible(&xtrxdev->onepps_ctrl);
 	return IRQ_HANDLED;
 }
 
@@ -666,12 +634,9 @@ static irqreturn_t xtrx_msi_irq_other(int irq, void *data)
 	struct xtrx_dev *xtrxdev = data;
 	uint32_t imask;
 
-	atomic_inc((atomic_t*)xtrxdev->shared_mmap + XTRX_KERN_MMAP_OTHER_IRQS);
-
 	imask = xtrx_readl(xtrxdev, GP_PORT_RD_INTERRUPTS);
 	xtrx_process_l_interrupts(xtrxdev, imask);
 
-	//printk(KERN_NOTICE PFX "IRQ_L: %x\n", imask);
 	return IRQ_HANDLED;
 }
 
@@ -680,19 +645,17 @@ static irqreturn_t xtrx_irq_legacy(int irq, void *data)
 {
 	struct xtrx_dev *xtrxdev = data;
 	uint32_t imask = xtrx_readl(xtrxdev, GP_PORT_RD_INTERRUPTS);
-	//printk(KERN_NOTICE PFX "IRQ_LEGACY: %03x\n", imask);
-
 	if (imask == 0) {
 		return IRQ_NONE;
 	}
 
-	if (imask & (1 << (INT_COUNT_L + INT_H_LMS7_SPI))) {
-		xtrx_msi_irq_ctrl(irq, data);
+	if (imask & (1 << (INT_1PPS))) {
+		xtrx_msi_irq_pps(irq, data);
 	}
-	if (imask & (1 << (INT_COUNT_L + INT_H_DMA_TX))) {
+	if (imask & (1 << (INT_DMA_TX))) {
 		xtrx_msi_irq_tx(irq, data);
 	}
-	if (imask & (1 << (INT_COUNT_L + INT_H_DMA_RX))) {
+	if (imask & (1 << (INT_DMA_RX))) {
 		xtrx_msi_irq_rx(irq, data);
 	}
 	xtrx_process_l_interrupts(xtrxdev, imask);
@@ -762,6 +725,7 @@ static ssize_t xtrxfd_read(struct file *filp, char __user *buf, size_t count,
 		return atomic_xchg(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_1PPS_IRQS, 0);
 
 	case XTRX_KERN_MMAP_CTRL_IRQS:
+
 		i = wait_event_interruptible_timeout(
 			xtrxdev->queue_ctrl,
 			atomic_read(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_CTRL_IRQS) != 0,
@@ -771,6 +735,17 @@ static ssize_t xtrxfd_read(struct file *filp, char __user *buf, size_t count,
 			return -EAGAIN;
 		}
 		return atomic_xchg(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_CTRL_IRQS, 0);
+
+	case XTRX_KERN_MMAP_I2C_IRQS:
+		i = wait_event_interruptible_timeout(
+			xtrxdev->queue_i2c,
+			atomic_read(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_I2C_IRQS) != 0,
+			2 * HZ);
+
+		if (!i) {
+			return -EAGAIN;
+		}
+		return atomic_xchg(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_I2C_IRQS, 0);
 
 	case XTRX_KERN_MMAP_RX_IRQS:
 		i = wait_event_interruptible_timeout(
@@ -813,7 +788,6 @@ static unsigned int xtrxfd_poll(struct file *filp, poll_table *wait)
 	poll_wait(filp, &xtrxdev->queue_ctrl, wait);
 	poll_wait(filp, &xtrxdev->queue_tx, wait);
 	poll_wait(filp, &xtrxdev->queue_rx, wait);
-	//poll_wait(filp, &xtrxdev->queue_other, wait);
 
 	if (atomic_read(((atomic_t*)xtrxdev->shared_mmap) + XTRX_KERN_MMAP_CTRL_IRQS))
 		mask |= POLLIN | POLLRDNORM;
@@ -977,6 +951,7 @@ static int xtrx_probe(struct pci_dev *pdev,
 	int err;
 	void __iomem* bar0_addr;
 	void __iomem* bar1_addr;
+	unsigned xtrx_no = devices;
 
 	printk(KERN_INFO PFX "Initializing %s\n", pci_name(pdev));
 
@@ -1036,7 +1011,7 @@ static int xtrx_probe(struct pci_dev *pdev,
 	pci_set_drvdata(pdev, xtrxdev);
 	xtrxdev->bar0_addr = bar0_addr;
 	xtrxdev->bar1_addr = bar1_addr;
-	xtrxdev->devno = devices;
+	xtrxdev->devno = xtrx_no;
 	xtrxdev->pdev = pdev;
 	xtrxdev->gps_ctrl_state = 0;
 	xtrxdev->sim_ctrl_state = 0;
@@ -1056,8 +1031,8 @@ static int xtrx_probe(struct pci_dev *pdev,
 	init_waitqueue_head(&xtrxdev->queue_ctrl);
 	init_waitqueue_head(&xtrxdev->queue_tx);
 	init_waitqueue_head(&xtrxdev->queue_rx);
-	init_waitqueue_head(&xtrxdev->queue_other);
 	init_waitqueue_head(&xtrxdev->onepps_ctrl);
+	init_waitqueue_head(&xtrxdev->queue_i2c);
 
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(4,11,0)
 	err = pci_enable_msi_range(pdev, XTRX_MSI_COUNT, XTRX_MSI_COUNT);
@@ -1067,28 +1042,28 @@ static int xtrx_probe(struct pci_dev *pdev,
 	if (err == XTRX_MSI_COUNT) {
 		xtrxdev->inttype = XTRX_MSI_4;
 
-		err = request_irq(pdev->irq + INT_H_LMS7_SPI, xtrx_msi_irq_ctrl, 0, "xtrx_ctrl", xtrxdev);
+		err = request_irq(pdev->irq + INT_1PPS, xtrx_msi_irq_pps, 0, "xtrx_pps", xtrxdev);
 		if (err) {
 			dev_err(&pdev->dev, "Failed to register CTRL MSI.\n");
 			err = -ENODEV;
 			goto err_msi;
 		}
 
-		err = request_irq(pdev->irq + INT_H_DMA_TX, xtrx_msi_irq_tx, 0, "xtrx_tx", xtrxdev);
+		err = request_irq(pdev->irq + INT_DMA_TX, xtrx_msi_irq_tx, 0, "xtrx_tx", xtrxdev);
 		if (err) {
 			dev_err(&pdev->dev, "Failed to register TX MSI.\n");
 			err = -ENODEV;
 			goto err_irq_0;
 		}
 
-		err = request_irq(pdev->irq + INT_H_DMA_RX, xtrx_msi_irq_rx, 0, "xtrx_rx", xtrxdev);
+		err = request_irq(pdev->irq + INT_DMA_RX, xtrx_msi_irq_rx, 0, "xtrx_rx", xtrxdev);
 		if (err) {
 			dev_err(&pdev->dev, "Failed to register RX MSI.\n");
 			err = -ENODEV;
 			goto err_irq_1;
 		}
 
-		err = request_irq(pdev->irq + INT_H_OTHER, xtrx_msi_irq_other, 0, "xtrx_other", xtrxdev);
+		err = request_irq(pdev->irq + 3, xtrx_msi_irq_other, 0, "xtrx_other", xtrxdev);
 		if (err) {
 			dev_err(&pdev->dev, "Failed to register OTHER MSI.\n");
 			err = -ENODEV;
@@ -1123,7 +1098,7 @@ static int xtrx_probe(struct pci_dev *pdev,
 		goto err_rx_bufs;
 	}
 
-	err = xtrx_uart_init(xtrxdev);
+	err = xtrx_uart_init(xtrxdev, xtrx_no);
 	if (err) {
 		goto err_uart;
 	}
@@ -1163,13 +1138,13 @@ err_irq_3:
 	if (xtrxdev->inttype == XTRX_LEGACY) {
 		free_irq(pdev->irq, xtrxdev);
 	} else if (xtrxdev->inttype == XTRX_MSI_4) {
-		free_irq(pdev->irq + INT_H_OTHER, xtrxdev);
+		free_irq(pdev->irq + 3, xtrxdev);
 err_irq_2:
-		free_irq(pdev->irq + INT_H_DMA_RX, xtrxdev);
+		free_irq(pdev->irq + 2, xtrxdev);
 err_irq_1:
-		free_irq(pdev->irq + INT_H_DMA_TX, xtrxdev);
+		free_irq(pdev->irq + 1, xtrxdev);
 err_irq_0:
-		free_irq(pdev->irq + INT_H_LMS7_SPI, xtrxdev);
+		free_irq(pdev->irq + 0, xtrxdev);
 err_msi:
 		pci_disable_msi(pdev);
 	}
@@ -1209,10 +1184,10 @@ static void xtrx_remove(struct pci_dev *pdev)
 	if (xtrxdev->inttype == XTRX_LEGACY) {
 		free_irq(pdev->irq, xtrxdev);
 	} else if (xtrxdev->inttype == XTRX_MSI_4) {
-		free_irq(pdev->irq + INT_H_OTHER, xtrxdev);
-		free_irq(pdev->irq + INT_H_DMA_RX, xtrxdev);
-		free_irq(pdev->irq + INT_H_DMA_TX, xtrxdev);
-		free_irq(pdev->irq + INT_H_LMS7_SPI, xtrxdev);
+		free_irq(pdev->irq + 0, xtrxdev);
+		free_irq(pdev->irq + 1, xtrxdev);
+		free_irq(pdev->irq + 2, xtrxdev);
+		free_irq(pdev->irq + 3, xtrxdev);
 
 		pci_disable_msi(pdev);
 	}

@@ -38,16 +38,16 @@
 
 /* Kernel shared mmap */
 
-#define XTRX_KERN_MMAP_CTRL_IRQS   0
+#define XTRX_KERN_MMAP_1PPS_IRQS   0
 #define XTRX_KERN_MMAP_TX_IRQS     1
 #define XTRX_KERN_MMAP_RX_IRQS     2
-#define XTRX_KERN_MMAP_OTHER_IRQS  3
-#define XTRX_KERN_MMAP_1PPS_IRQS   4
+#define XTRX_KERN_MMAP_CTRL_IRQS   3
+
 #define XTRX_KERN_MMAP_GPS_RX_IRQS 5
 #define XTRX_KERN_MMAP_GPS_TX_IRQS 6
 #define XTRX_KERN_MMAP_SIM_RX_IRQS 7
 #define XTRX_KERN_MMAP_SIM_TX_IRQS 8
-
+#define XTRX_KERN_MMAP_I2C_IRQS    9
 
 
 #endif
