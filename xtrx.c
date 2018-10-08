@@ -663,13 +663,6 @@ static irqreturn_t xtrx_irq_legacy(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t xtrx_msi_irq_single(int irq, void *data)
-{
-	xtrx_irq_legacy(irq, data);
-	return IRQ_HANDLED;
-}
-
-
 static struct pps_source_info xtrx_pps_info = {
 	.name		= "xtrx_pps",
 	.path		= "",
@@ -876,11 +869,11 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		printk(KERN_NOTICE PFX "mmap() call: VMA=%p vma->vm_pgoff=%lu addr=%p dev_addr=%lx bus_addr=%lx phys_addr=%lx\n",
 			vma, vma->vm_pgoff, (vma->vm_pgoff == 0) ? xtrxdev->bar0_addr : xtrxdev->bar1_addr,
 			(long unsigned int)addr,
-			(long unsigned int)(bus_to_virt(addr)),
-			(long unsigned int)(virt_to_phys(bus_to_virt(addr))) );
+			(long unsigned int)(phys_to_virt(addr)),
+			(long unsigned int)(virt_to_phys(phys_to_virt(addr))) );
 
 		if (io_remap_pfn_range(vma, vma->vm_start,
-			virt_to_phys(bus_to_virt(addr)) >> PAGE_SHIFT,
+			virt_to_phys(phys_to_virt(addr)) >> PAGE_SHIFT,
 			vma->vm_end - vma->vm_start,
 			vma->vm_page_prot))
 			return -EAGAIN;
