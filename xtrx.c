@@ -61,6 +61,9 @@
 #define XTRX_UART_LINE_GPS		0
 #define XTRX_UART_LINE_SIM		1
 
+#ifndef PCI_EXP_DEVCTL_READRQ_4096B
+#define PCI_EXP_DEVCTL_READRQ_4096B 0x5000
+#endif
 
 /* Serial virtual devices */
 struct xtrx_dev;
@@ -962,9 +965,9 @@ static int xtrx_probe(struct pci_dev *pdev,
 		return err;
 	}
 
-	/* Reconfigure MaxReadReq to 2KB */
+	/* Reconfigure MaxReadReq to 4KB */
 	pcie_capability_clear_and_set_word(pdev, PCI_EXP_DEVCTL,
-					   PCI_EXP_DEVCTL_READRQ, 0x4000);
+					   PCI_EXP_DEVCTL_READRQ, PCI_EXP_DEVCTL_READRQ_4096B);
 
 	pci_set_master(pdev);
 
