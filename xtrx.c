@@ -1110,11 +1110,11 @@ static int xtrx_probe(struct pci_dev *pdev,
 	}
 
 	xtrxdev->cdevice = device_create(xtrx_class,
-				       NULL,
-				       MKDEV(MAJOR(dev_first), MINOR(dev_first) + devices),
-				       NULL,
-				       DEVICE_NAME "%d",
-				       devices);
+					 &pdev->dev,
+					 MKDEV(MAJOR(dev_first), MINOR(dev_first) + devices),
+					 NULL,
+					 DEVICE_NAME "%d",
+					 devices);
 	if (IS_ERR(xtrxdev->cdevice)) {
 		printk(KERN_NOTICE PFX "Unable to register device class\n");
 		goto failed_class;
