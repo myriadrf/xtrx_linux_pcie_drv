@@ -39,10 +39,16 @@
 #include <linux/time.h>
 #include <linux/pps_kernel.h>
 #include <linux/version.h>
+#include <linux/slab.h>
 #include <asm/page.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/atomic.h>
+
+#if defined(__arm__) || defined(__aarch64__)
+/* FIXME: rewrite this code in modern api */
+#define bus_to_virt(x) phys_to_virt(x)
+#endif
 
 #include "xtrx_defs.h"
 
