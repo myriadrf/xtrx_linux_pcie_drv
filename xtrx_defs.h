@@ -28,6 +28,9 @@
 #define XTRX_MMAP_TX_OFF		134217728
 
 
+#define XTRX_IOCTL_MAGIC                0xEE
+#define XTRX_IOCTL_RXALLOCBUFS          _IO( XTRX_IOCTL_MAGIC, 0 )
+
 #define XTRX_IOCTL_SPI_TRANSACT		0x123456
 
 

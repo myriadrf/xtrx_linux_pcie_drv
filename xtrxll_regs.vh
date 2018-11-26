@@ -31,6 +31,15 @@ localparam GP_PORT_WR_USB_CTRL    = 19;
 localparam GP_PORT_WR_USB_FIFO_CTRL = 20;
 localparam GP_PORT_WR_USB_FIFO_PTRS = 21;
 localparam GP_PORT_WR_FE_CMD        = 22;
+localparam GP_PORT_WR_PPS_CMD       = 23;
+
+localparam GP_PORT_WR_GPIO_FUNC     = 24;
+localparam GP_PORT_WR_GPIO_DIR      = 25;
+localparam GP_PORT_WR_GPIO_OUT      = 26;
+localparam GP_PORT_WR_GPIO_CS       = 27;
+
+localparam GP_PORT_WR_GLOBCMDR0     = 28;
+localparam GP_PORT_WR_GLOBCMDR1     = 29;
 
 //RD
 localparam GP_PORT_RD_SPI_LMS7_0  = 0;
@@ -66,12 +75,12 @@ localparam GP_PORT_RD_RXIQ_BI_BQ  = 23;
 localparam GP_PORT_RD_USB_RB      = 24;
 localparam GP_PORT_RD_RXIQ_PERIOD = 25;
 localparam GP_PORT_RD_HWCFG       = 26;
-localparam GP_PORT_RD_USB_DEBUG0  = 27;
+localparam GP_PORT_RD_GPIO_IN     = 27;
 
-localparam GP_PORT_RD_USB_DEBUG1  = 28;
-localparam GP_PORT_RD_USB_DEBUG2  = 29;
-localparam GP_PORT_RD_USB_DEBUG3  = 30;
-localparam GP_PORT_RD_USB_DEBUG4  = 31;
+localparam GP_PORT_RD_USB_DEBUG0  = 28;
+localparam GP_PORT_RD_USB_DEBUG1  = 29;
+localparam GP_PORT_RD_USB_DEBUG2  = 30;
+localparam GP_PORT_RD_USB_DEBUG3  = 31;
 
 localparam GP_PORT_RD_USB_EP0_O   = 32;
 localparam GP_PORT_RD_USB_EP1_O   = 32 + 1;

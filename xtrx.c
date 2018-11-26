@@ -71,6 +71,20 @@
 #define PCI_EXP_DEVCTL_READRQ_4096B 0x5000
 #endif
 
+/* Move out to extrnal CMD */
+#define GET_HWID_COMPAT(x) ((x >> 8) & 0xff)
+#define MAKE_I2C_CMD(RD, RDZSZ, WRSZ, DEVNO, DATA)  (\
+	(((RD) & 1U) << 31) | \
+	(((RDZSZ) & 7U) << 28) | \
+	(((WRSZ) & 3U) << 26) | \
+	(((DEVNO) & 3U) << 24) | \
+	(((DATA) & 0xffffffu) << 0))
+#define MAKE_LP8758XX_I2C_CMD(BUS, REG, IN) \
+	MAKE_I2C_CMD(0, 0, 2, (BUS), (REG) | ((u32)(IN) << 8))
+#define MAKE_LP8758LMS_I2C_CMD(REG, IN) \
+	MAKE_LP8758XX_I2C_CMD(3, REG, IN)
+
+
 /* Serial virtual devices */
 struct xtrx_dev;
 
@@ -84,7 +98,11 @@ enum xtrx_uart_types {
 #define BUFS      32
 #define BUF_SIZE  32768
 
+#define BUF_SIZE_MIN       8192
+#define BUF_SIZE_MAX    4194304
+
 #define UART_PORT_OPEN 1
+
 
 struct xtrx_dmabuf_nfo {
 	void* virt;
@@ -97,12 +115,21 @@ typedef enum xtrx_interrupt_type {
 	XTRX_LEGACY
 } xtrx_interrupt_type_t;
 
+
+enum xtrx_pwr_blocks {
+	XTRX_BLK_CHAR_DEV = 1,
+	XTRX_BLK_GPS_UART = 2,
+	XTRX_BLK_SIM_UART = 4,
+};
+
 struct xtrx_dev {
 	struct xtrx_dev *next;   /* next device in list */
 	unsigned devno;
+	unsigned locked_msk;
 
-	struct semaphore sem;     /* mutual exclusion semaphore     */
-	struct cdev cdev;         /* Char device structure      */
+	spinlock_t slock;
+
+	struct cdev cdev;
 	struct device* cdevice;
 
 	xtrx_interrupt_type_t inttype;
@@ -122,6 +149,9 @@ struct xtrx_dev {
 
 	void  *shared_mmap;
 
+	unsigned buf_rx_size; /* actual size of each buffer in the RX ring */
+	unsigned buf_tx_size; /* actual size of each buffer in the TX ring */
+
 	struct xtrx_dmabuf_nfo buf_rx[BUFS];  /* RX bufs */
 	struct xtrx_dmabuf_nfo buf_tx[BUFS];  /* TX bufs */
 
@@ -131,6 +161,8 @@ struct xtrx_dev {
 
 	unsigned gps_ctrl_state;
 	unsigned sim_ctrl_state;
+	u32 hwid;
+	u32 pwr_msk;
 };
 
 
@@ -156,6 +188,42 @@ static unsigned int xtrx_readl(struct xtrx_dev *dev, unsigned int off)
 	return be32_to_cpu(ioread32((void __iomem *)((unsigned long)dev->bar0_addr + 4*off)));
 }
 
+static int xtrx_power_op(struct xtrx_dev *dev, int on, unsigned mask) 
+{
+	unsigned long flags;
+
+	int do_pwr_op = 0;
+	spin_lock_irqsave(&dev->slock, flags);
+	if (on) {
+		if (dev->pwr_msk == 0) {
+			do_pwr_op = 1; 
+		}
+		dev->pwr_msk |= mask;
+	} else {
+		if (dev->pwr_msk) {
+			dev->pwr_msk &= ~mask;
+			if (dev->pwr_msk == 0) {
+				do_pwr_op = 1;
+			}
+		}
+	}
+	spin_unlock_irqrestore(&dev->slock, flags);
+
+	if (!do_pwr_op)
+		return 0;
+
+	printk(KERN_NOTICE PFX " 3V3 CTRL:%d\n", on);
+	if (on) {
+		xtrx_writel(dev, UL_GP_ADDR + GP_PORT_WR_TMP102,
+				MAKE_LP8758LMS_I2C_CMD(0x0c, 0xfc));
+		xtrx_writel(dev, UL_GP_ADDR + GP_PORT_WR_TMP102,
+				MAKE_LP8758LMS_I2C_CMD(0x04, 0x88));
+	} else {
+		xtrx_writel(dev, UL_GP_ADDR + GP_PORT_WR_TMP102,
+				MAKE_LP8758LMS_I2C_CMD(0x04, 0xc8));
+	}
+	return 1;
+}
 
 #define PORT_XTRX 0x03300330
 
@@ -245,6 +313,8 @@ static int xtrx_uart_startup(struct uart_port *port)
 		xtrx_writel(dev, GP_PORT_WR_SIM_CTRL, dev->sim_ctrl_state);
 
 		spin_unlock_irqrestore(&port->lock, flags);
+
+		xtrx_power_op(dev, 1, XTRX_BLK_SIM_UART);
 	} else {
 		dev->gps_ctrl_state = UART_PORT_OPEN;
 
@@ -255,6 +325,8 @@ static int xtrx_uart_startup(struct uart_port *port)
 			//xtrx_uart_do_tx(&dev->port_gps, tx_fifo_used);
 		}
 		spin_unlock(&dev->port_gps.lock);
+
+		xtrx_power_op(dev, 1, XTRX_BLK_GPS_UART);
 	}
 
 	printk(KERN_NOTICE PFX "Port opened: %d\n", port->line);
@@ -273,8 +345,12 @@ static void xtrx_uart_shutdown(struct uart_port *port)
 		xtrx_writel(dev, GP_PORT_WR_SIM_CTRL, dev->sim_ctrl_state);
 
 		spin_unlock_irqrestore(&port->lock, flags);
+
+		xtrx_power_op(dev, 0, XTRX_BLK_SIM_UART);
 	} else {
 		dev->gps_ctrl_state = 0;
+
+		xtrx_power_op(dev, 0, XTRX_BLK_GPS_UART);
 	}
 
 	printk(KERN_NOTICE PFX "Port closed: %d\n", port->line);
@@ -415,6 +491,15 @@ txq_empty:
 	return;
 }
 
+/*
+static int xtrx_uart_verify_ioctl(struct uart_port *port, unsigned int cmd, unsigned long arg)
+{
+	printk(KERN_NOTICE PFX "UART IOCTL %d: %08x -> %016lx\n",
+		port->line, cmd, arg);
+	return -EINVAL;
+}
+*/
+
 static struct uart_ops xtrx_uart_ops = {
 	.tx_empty	= xtrx_uart_tx_empty,
 	.get_mctrl	= xtrx_uart_get_mctrl,
@@ -432,6 +517,7 @@ static struct uart_ops xtrx_uart_ops = {
 	.request_port	= xtrx_uart_request_port,
 	.config_port	= xtrx_uart_config_port,
 	.verify_port	= xtrx_uart_verify_port,
+	//.ioctl          = xtrx_uart_verify_ioctl,
 };
 
 
@@ -500,48 +586,74 @@ static void xtrx_uart_deinit(struct xtrx_dev* dev)
 }
 
 // DMA functions
-static void xtrx_update_rxdma_len(struct xtrx_dev *d, struct xtrx_dmabuf_nfo *pbufs, unsigned config_off, unsigned len_qw)
+static void xtrx_set_dma_bufs(struct xtrx_dev *d, struct xtrx_dmabuf_nfo *pbufs, unsigned config_off, unsigned len)
 {
-    int i;
-    //Initialize DMA buffers
-    for (i = 0; i < BUFS; i++) {
-        uintptr_t addr = ((uintptr_t)d->bar0_addr) + config_off + 4 * i;
-        uint32_t reg   = ((len_qw - 1) & 0xFFF) | (0xFFFFF000 & pbufs[i].phys);
-        printk(KERN_NOTICE PFX "buf[%d]=%lx [virt %p] => %08x\n", i, (unsigned long)pbufs[i].phys, pbufs[i].virt, reg);
+	int i;
+	unsigned len_qw = len / 16;
 
-        iowrite32(cpu_to_be32(reg), (void __iomem *)(addr));
-        //xtrx_writel(d, config_off + 4 * i, reg);
+	//Initialize DMA buffers
+	for (i = 0; i < BUFS; i++) {
+		uintptr_t addr = ((uintptr_t)d->bar0_addr) + config_off + 4 * i;
+		uint32_t reg   = ((len_qw - 1) & 0xFFF) | (0xFFFFF000 & pbufs[i].phys);
+		printk(KERN_NOTICE PFX "buf[%d]=%lx [virt %p] => %08x\n", i, (unsigned long)pbufs[i].phys, pbufs[i].virt, reg);
 
-        memset(pbufs[i].virt, i+1, BUF_SIZE);
-    }
+		iowrite32(cpu_to_be32(reg), (void __iomem *)(addr));
+		memset(pbufs[i].virt, i+1, len);
+	}
 }
 
-static int xtrx_allocdma(struct xtrx_dev *d, struct xtrx_dmabuf_nfo *pbufs, unsigned config_off)
+
+static void xtrx_update_rxdma_len(struct xtrx_dev *d, struct xtrx_dmabuf_nfo *pbufs, unsigned len)
+{
+	if ((GET_HWID_COMPAT(d->hwid) >= 1)) {
+		uint32_t pktsz = (unsigned)((len / 16) - 1) | (1U << 31);
+		xtrx_writel(d, UL_RXDMA_ADDR + 32, pktsz);
+	} else {
+		xtrx_set_dma_bufs(d, pbufs, 0x800, len);
+	}
+}
+
+static int xtrx_allocdma(struct xtrx_dev *d, struct xtrx_dmabuf_nfo *pbufs, unsigned config_off, unsigned buflen)
 {
 	int i;
 	for (i = 0; i < BUFS; i++) {
-		pbufs[i].virt = pci_alloc_consistent(d->pdev, BUF_SIZE, &pbufs[i].phys);
+		pbufs[i].virt = pci_alloc_consistent(d->pdev, buflen, &pbufs[i].phys);
 		if (!pbufs[i].virt) {
 			printk(KERN_INFO PFX "Failed to allocate %d DMA buffer", i);
 			for (; i >= 0; --i) {
-				pci_free_consistent(d->pdev, BUF_SIZE, pbufs[i].virt, pbufs[i].phys);
+				pci_free_consistent(d->pdev, buflen, pbufs[i].virt, pbufs[i].phys);
 			}
 			return -1;
 		}
 	}
 
-	xtrx_update_rxdma_len(d, pbufs, config_off, BUF_SIZE / 16);
+	xtrx_set_dma_bufs(d, pbufs, config_off, buflen);
 	return 0;
 }
 
-static int xtrx_allocdma_tx(struct xtrx_dev *d)
+static int xtrx_allocdma_tx(struct xtrx_dev *d, unsigned size)
 {
-	return xtrx_allocdma(d, d->buf_tx, 0xC00);
+	int res = xtrx_allocdma(d, d->buf_tx, 0xC00, size);
+	if (res) {
+		d->buf_tx_size = 0;
+		return res;
+	}
+
+	d->buf_tx_size = size;
+	return 0;
 }
 
-static int xtrx_allocdma_rx(struct xtrx_dev *d)
+static int xtrx_allocdma_rx(struct xtrx_dev *d, unsigned size)
 {
-	return xtrx_allocdma(d, d->buf_rx, 0x800);
+	int res = xtrx_allocdma(d, d->buf_rx, 0x800, size);
+	if (res) {
+		d->buf_rx_size = 0;
+		return res;
+	}
+
+	xtrx_update_rxdma_len(d, d->buf_rx, size);
+	d->buf_rx_size = size;
+	return 0;
 }
 
 
@@ -550,16 +662,18 @@ static void xtrx_freedma_rx(struct xtrx_dev *d)
 {
 	int i;
 	for (i = 0; i < BUFS; i++) {
-		pci_free_consistent(d->pdev, BUF_SIZE, d->buf_rx[i].virt, d->buf_rx[i].phys);
+		pci_free_consistent(d->pdev, d->buf_rx_size, d->buf_rx[i].virt, d->buf_rx[i].phys);
 	}
+	d->buf_rx_size = 0;
 }
 
 static void xtrx_freedma_tx(struct xtrx_dev *d)
 {
 	int i;
 	for (i = 0; i < BUFS; i++) {
-		pci_free_consistent(d->pdev, BUF_SIZE, d->buf_tx[i].virt, d->buf_tx[i].phys);
+		pci_free_consistent(d->pdev, d->buf_tx_size, d->buf_tx[i].virt, d->buf_tx[i].phys);
 	}
+	d->buf_tx_size = 0;
 }
 
 
@@ -689,16 +803,33 @@ static struct pps_source_info xtrx_pps_info = {
 
 static int xtrxfd_open(struct inode *inode, struct file *filp)
 {
-	struct xtrx_dev *dev; /* device information */
+	struct xtrx_dev *dev;
+	unsigned long flags;
+	int granted = 0;
 
 	dev = container_of(inode->i_cdev, struct xtrx_dev, cdev);
-	filp->private_data = dev; /* for other methods */
+	filp->private_data = dev;
 
-	return 0;
+	spin_lock_irqsave(&dev->slock, flags);
+	if ((dev->locked_msk & XTRX_BLK_CHAR_DEV) == 0) {
+		dev->locked_msk |= XTRX_BLK_CHAR_DEV;
+		granted = 1; 
+	}
+	spin_unlock_irqrestore(&dev->slock, flags);
+
+	return (granted) ? 0 : -EBUSY;
 }
 
 static int xtrxfd_release(struct inode *inode, struct file *filp)
 {
+	struct xtrx_dev *xtrxdev = filp->private_data;
+	unsigned long flags;
+
+	xtrx_power_op(xtrxdev, 0, XTRX_BLK_CHAR_DEV);
+
+	spin_lock_irqsave(&xtrxdev->slock, flags);
+	xtrxdev->locked_msk &= ~XTRX_BLK_CHAR_DEV;
+	spin_unlock_irqrestore(&xtrxdev->slock, flags);
 	return 0;
 }
 
@@ -816,6 +947,7 @@ static long xtrxfd_ioctl(struct file *filp,
 			 unsigned int ioctl_num,/* The number of the ioctl */
 			 unsigned long ioctl_param) /* The parameter to it */
 {
+	int err;
 	struct xtrx_dev *xtrxdev = filp->private_data;
 	printk(KERN_WARNING PFX "ioctl(%x, %lx) [%lx]", ioctl_num, ioctl_param, (unsigned long)xtrxdev->bar0_addr);
 
@@ -823,16 +955,36 @@ static long xtrxfd_ioctl(struct file *filp,
 		case 0x123458: {
 			int i;
 			for ( i = 0; (i < BUFS); ++i) {
-				memset( xtrxdev->buf_rx[i].virt, i + 1, BUF_SIZE);
+				memset( xtrxdev->buf_rx[i].virt, i + 1, xtrxdev->buf_rx_size);
 			}
 			return 0;
 		}
 		case 0x123459: {
-			if (ioctl_param > BUF_SIZE)
+			if (ioctl_param > xtrxdev->buf_rx_size)
 				return -E2BIG;
+			if (ioctl_param < BUF_SIZE_MIN)
+				return -EINVAL;
 
-		    xtrx_update_rxdma_len(xtrxdev, xtrxdev->buf_rx, 0x800, ioctl_param);
+		    xtrx_update_rxdma_len(xtrxdev, xtrxdev->buf_rx, ioctl_param);
 		    return 0;
+		}
+		case 0x12345A: {
+			if (ioctl_param > BUF_SIZE_MAX || ioctl_param < BUF_SIZE_MIN) {
+				printk(KERN_WARNING PFX " INCORRECT SZ!\n");
+				return -EINVAL;
+			}
+			if (ioctl_param <= xtrxdev->buf_rx_size)
+				return xtrxdev->buf_rx_size;
+
+			xtrx_freedma_rx(xtrxdev);
+			err = xtrx_allocdma_rx(xtrxdev, ioctl_param);
+			if (err < 0) {
+				return err;
+			}
+			return xtrxdev->buf_rx_size;
+		}
+		case 0x12345B: {
+			return xtrx_power_op(xtrxdev, ioctl_param, XTRX_BLK_CHAR_DEV);
 		}
 		default: return -EINVAL;
 	}
@@ -858,9 +1010,33 @@ static struct vm_operations_struct xtrxfd_remap_vm_ops = {
 static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	struct xtrx_dev *xtrxdev = filp->private_data;
-	printk(KERN_NOTICE PFX "call: VMA=%p vma->vm_pgoff=%lu\n", vma, vma->vm_pgoff);
+	enum xtrx_mmap_region {
+		REGION_STAT,
+		REGION_CTRL,
+		REGION_TX_DEVMEM,
+		REGION_RX_BUF,
+		REGION_TX_BUF,
+	} region;
 
 	if (vma->vm_pgoff == (XTRX_MMAP_STAT_OFF >> PAGE_SHIFT)) {
+		region = REGION_STAT;
+	} else if (vma->vm_pgoff == 0) {
+		region = REGION_CTRL;
+	} else if (vma->vm_pgoff == (XTRX_MMAP_TX_BUF_OFF >> PAGE_SHIFT)) {
+		region = REGION_TX_DEVMEM;
+	} else if (vma->vm_pgoff == (XTRX_MMAP_RX_OFF >> PAGE_SHIFT)) {
+		region = REGION_RX_BUF;
+	} else if (vma->vm_pgoff == (XTRX_MMAP_TX_OFF >> PAGE_SHIFT)) {
+		region = REGION_TX_BUF;
+	} else {
+		printk(KERN_NOTICE PFX "call: UNKNOWN REGION: VMA=%p vma->vm_pgoff=%lu\n", vma, vma->vm_pgoff);
+		return -ENXIO;
+	}
+
+	printk(KERN_NOTICE PFX "call: REGION=%d VMA=%p vma->vm_pgoff=%lu\n",
+		   region, vma, vma->vm_pgoff);
+
+	if (region == REGION_STAT) {
 		if ((vma->vm_end - vma->vm_start) != (1 << PAGE_SHIFT)) {
 			return -EINVAL;
 		}
@@ -876,17 +1052,11 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		vma->vm_ops = &xtrxfd_remap_vm_ops;
 		xtrxfd_vma_open(vma);
 		return 0;
-	} else if (vma->vm_pgoff == 0 || vma->vm_pgoff == (XTRX_MMAP_TX_BUF_OFF >> PAGE_SHIFT)) {
+	} else if (region == REGION_CTRL || region == REGION_TX_DEVMEM) {
 		resource_size_t addr;
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 		vma->vm_flags |= VM_IO;
-		addr = pci_resource_start(xtrxdev->pdev, (vma->vm_pgoff == 0) ? 0 : 1);
-
-		printk(KERN_NOTICE PFX "mmap() call: VMA=%p vma->vm_pgoff=%lu addr=%p dev_addr=%lx bus_addr=%lx phys_addr=%lx\n",
-			vma, vma->vm_pgoff, (vma->vm_pgoff == 0) ? xtrxdev->bar0_addr : xtrxdev->bar1_addr,
-			(long unsigned int)addr,
-			(long unsigned int)(bus_to_virt(addr)),
-			(long unsigned int)(virt_to_phys(bus_to_virt(addr))) );
+		addr = pci_resource_start(xtrxdev->pdev, (region == REGION_CTRL) ? 0 : 1);
 
 		if (io_remap_pfn_range(vma, vma->vm_start,
 			virt_to_phys(bus_to_virt(addr)) >> PAGE_SHIFT,
@@ -897,38 +1067,34 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		vma->vm_ops = &xtrxfd_remap_vm_ops;
 		xtrxfd_vma_open(vma);
 		return 0;
-	} else if (vma->vm_pgoff == (XTRX_MMAP_RX_OFF >> PAGE_SHIFT) || vma->vm_pgoff == (XTRX_MMAP_TX_OFF >> PAGE_SHIFT) ) {
+	} else if (region == REGION_RX_BUF || region == REGION_TX_BUF) {
 		unsigned long pfn, off;
 		unsigned i;
 		int ret;
-		struct xtrx_dmabuf_nfo *pbufs = (vma->vm_pgoff == (XTRX_MMAP_RX_OFF >> PAGE_SHIFT)) ? xtrxdev->buf_rx : xtrxdev->buf_tx;
+		struct xtrx_dmabuf_nfo *pbufs = (region == REGION_RX_BUF) ? xtrxdev->buf_rx : xtrxdev->buf_tx;
+		unsigned bufsize = (region == REGION_RX_BUF) ? xtrxdev->buf_rx_size : xtrxdev->buf_tx_size;
 
-		printk(KERN_NOTICE PFX "mmap() call: VMA=%p vma->vm_pgoff=%lu\n", vma, vma->vm_pgoff);
-
-		//DO this unportable first!
-		if ((vma->vm_end - vma->vm_start) != BUF_SIZE * BUFS) {
+		if ((vma->vm_end - vma->vm_start) != BUFS * bufsize) {
+			printk(KERN_NOTICE PFX "mmap() :  end-start=%lx -> %lx\n",
+				(long)(vma->vm_end - vma->vm_start), (long)(BUFS * bufsize));
 			return -EINVAL;
 		}
 
 		//vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 		vma->vm_flags |= VM_LOCKED;
 
-		for (i = 0, off = 0; i < BUFS; ++i, off += BUF_SIZE) {
+		for (i = 0, off = 0; i < BUFS; ++i, off += bufsize) {
 			pfn = page_to_pfn(virt_to_page(pbufs[i].virt));
 			ret = remap_pfn_range(vma, vma->vm_start + off,
 						pfn,
-						BUF_SIZE,
+						bufsize,
 						vma->vm_page_prot);
-
-			printk(KERN_NOTICE PFX "mmap() :  remap() VMA=%p addr=%lx pfn=%lx ret=%d\n",
-				vma, vma->vm_start + off, pfn, ret);
 		}
 
 		return ret;
 	}
-	printk(KERN_NOTICE PFX "call: VMA=%p vma->vm_pgoff=%lu\n", vma, vma->vm_pgoff);
 
-	return -ENXIO;
+	return -EINVAL;
 }
 
 struct file_operations xtrx_fops = {
@@ -1022,14 +1188,21 @@ static int xtrx_probe(struct pci_dev *pdev,
 	xtrxdev->bar1_addr = bar1_addr;
 	xtrxdev->devno = xtrx_no;
 	xtrxdev->pdev = pdev;
+	xtrxdev->locked_msk = 0;
 	xtrxdev->gps_ctrl_state = 0;
 	xtrxdev->sim_ctrl_state = 0;
+	xtrxdev->pwr_msk = 0;
+
+	spin_lock_init(&xtrxdev->slock);
+
 	xtrxdev->shared_mmap = (char*)get_zeroed_page(GFP_KERNEL);
 	if (!xtrxdev->shared_mmap) {
 		dev_err(&pdev->dev, "Failed to allocate kernel mmap memory.\n");
 		err = -ENOMEM;
 		goto err_alloc0;
 	}
+
+	xtrxdev->hwid = xtrx_readl(xtrxdev, GP_PORT_RD_HWCFG);
 
 	xtrxdev->pps = pps_register_source(&xtrx_pps_info,
 					PPS_CAPTUREASSERT | PPS_OFFSETASSERT);
@@ -1042,6 +1215,7 @@ static int xtrx_probe(struct pci_dev *pdev,
 	init_waitqueue_head(&xtrxdev->queue_rx);
 	init_waitqueue_head(&xtrxdev->onepps_ctrl);
 	init_waitqueue_head(&xtrxdev->queue_i2c);
+
 
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(4,11,0)
 	err = pci_enable_msi_range(pdev, XTRX_MSI_COUNT, XTRX_MSI_COUNT);
@@ -1079,28 +1253,55 @@ static int xtrx_probe(struct pci_dev *pdev,
 			goto err_irq_2;
 		}
 	} else {
-		dev_err(&pdev->dev, "Failed to enable 4-vector MSI, falling back to legacy mode.\n");
-		xtrxdev->inttype = XTRX_LEGACY;
 
-		err = request_irq(pdev->irq, xtrx_irq_legacy, IRQF_SHARED, "xtrx_legacy", xtrxdev);
-		if (err) {
-			dev_err(&pdev->dev, "Failed to register Legacy interrupt.\n");
-			err = -ENODEV;
-			goto err_alloc1;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4,11,0)
+		err = pci_enable_msi_range(pdev, 1, 1);
+#else
+		err = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
+#endif
+		if (err == 1) {
+			xtrxdev->inttype = XTRX_MSI_SINGLE;
+
+			err = request_irq(pdev->irq, xtrx_msi_irq_single, 0, "xtrx_msi_single", xtrxdev);
+			if (err) {
+				dev_err(&pdev->dev, "Failed to register SINGLE MSI.\n");
+				err = -ENODEV;
+				goto err_msi;
+			}	
+		} else {
+			dev_err(&pdev->dev, "Failed to enable MSI, falling back to legacy mode.\n");
+			xtrxdev->inttype = XTRX_LEGACY;
+
+			err = request_irq(pdev->irq, xtrx_irq_legacy, IRQF_SHARED, "xtrx_legacy", xtrxdev);
+			if (err) {
+				dev_err(&pdev->dev, "Failed to register Legacy interrupt.\n");
+				err = -ENODEV;
+				goto err_alloc1;
+			}
 		}
 	}
+
+	/* Clear pending interrupts */
+	xtrx_readl(xtrxdev, GP_PORT_RD_INTERRUPTS);
+
+	/* Enable interrupts */
+	xtrx_writel(xtrxdev, GP_PORT_WR_INT_PCIE, (1U << INT_PCIE_I_FLAG) | 0xfff);
+
+	// Mark that we don't have preallocated buffers
+	xtrxdev->buf_rx_size = 0;
+	xtrxdev->buf_tx_size = 0;
 
 	memset(xtrxdev->buf_rx, 0, sizeof(xtrxdev->buf_rx));
 	memset(xtrxdev->buf_tx, 0, sizeof(xtrxdev->buf_tx));
 
-	err = xtrx_allocdma_rx(xtrxdev);
+	err = xtrx_allocdma_rx(xtrxdev, BUF_SIZE);
 	if (err) {
 		dev_err(&pdev->dev, "Failed to register RX DMA buffers.\n");
 		err = -ENODEV;
 		goto err_irq_3;
 	}
 
-	err = xtrx_allocdma_tx(xtrxdev);
+	err = xtrx_allocdma_tx(xtrxdev, BUF_SIZE);
 	if (err) {
 		dev_err(&pdev->dev, "Failed to register TX DMA buffers.\n");
 		err = -ENODEV;
@@ -1130,6 +1331,7 @@ static int xtrx_probe(struct pci_dev *pdev,
 	}
 
 
+
 	devices++;
 	xtrxdev->next = xtrx_list;
 	xtrx_list = xtrxdev;
@@ -1144,8 +1346,15 @@ err_uart:
 err_rx_bufs:
 	xtrx_freedma_rx(xtrxdev);
 err_irq_3:
+	xtrx_writel(xtrxdev, GP_PORT_WR_INT_PCIE, (1U << INT_PCIE_I_FLAG));
+	xtrx_readl(xtrxdev, GP_PORT_RD_INTERRUPTS);
+
 	if (xtrxdev->inttype == XTRX_LEGACY) {
 		free_irq(pdev->irq, xtrxdev);
+	} else if (xtrxdev->inttype == XTRX_MSI_SINGLE) {
+		free_irq(pdev->irq, xtrxdev);
+
+		pci_disable_msi(pdev);
 	} else if (xtrxdev->inttype == XTRX_MSI_4) {
 		free_irq(pdev->irq + 3, xtrxdev);
 err_irq_2:
@@ -1185,6 +1394,11 @@ static void xtrx_remove(struct pci_dev *pdev)
 	struct xtrx_dev* xtrxdev = pci_get_drvdata(pdev);
 	printk(KERN_INFO PFX "Removing device %s\n", pci_name(pdev));
 
+	/* Disable interrupts */
+	xtrx_writel(xtrxdev, GP_PORT_WR_INT_PCIE, (1U << INT_PCIE_I_FLAG));
+	/* Clear pending interrupts */
+	xtrx_readl(xtrxdev, GP_PORT_RD_INTERRUPTS);
+
 	device_destroy(xtrx_class, MKDEV(MAJOR(dev_first), MINOR(xtrxdev->devno)));
 
 	cdev_del(&xtrxdev->cdev);
@@ -1192,6 +1406,10 @@ static void xtrx_remove(struct pci_dev *pdev)
 
 	if (xtrxdev->inttype == XTRX_LEGACY) {
 		free_irq(pdev->irq, xtrxdev);
+	} else if (xtrxdev->inttype == XTRX_MSI_SINGLE) {
+		free_irq(pdev->irq, xtrxdev);
+
+		pci_disable_msi(pdev);
 	} else if (xtrxdev->inttype == XTRX_MSI_4) {
 		free_irq(pdev->irq + 0, xtrxdev);
 		free_irq(pdev->irq + 1, xtrxdev);
