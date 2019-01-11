@@ -2,7 +2,7 @@
 set -e
 
 if [ "$1" = "configure" ]; then
-	new_version="0.0.1-1"
+	new_version="0.0.1-2"
 	occurrences=/usr/sbin/dkms status | grep "xtrx" | grep "${new_version}" | wc -l
 	if [ ! occurrences > 0 ];
 	then
