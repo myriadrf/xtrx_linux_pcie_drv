@@ -21,7 +21,7 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "XTRX PCIe kernel dkms driver")
 set(CPACK_PACKAGE_VENDOR              "Fairwaves, Inc.")
 set(CPACK_PACKAGE_CONTACT             "http://fairwaves.co/wp/contact-us/")
 set(CPACK_PACKAGE_VERSION             ${LIBVER}-${MAINT_VERSION})
-set(CPACK_DEBIAN_PACKAGE_DEPENDS      "linux-headers-generic (>= 4.4.0)")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS      "linux-headers-generic (>= 4.4.0), dkms")
 
 set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}")
 set(CPACK_SET_DESTDIR               "")

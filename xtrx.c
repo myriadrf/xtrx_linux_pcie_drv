@@ -126,6 +126,7 @@ struct xtrx_dev {
 	struct xtrx_dev *next;   /* next device in list */
 	unsigned devno;
 	unsigned locked_msk;
+	unsigned valid; /* usage counter */
 
 	spinlock_t slock;
 
@@ -812,8 +813,9 @@ static int xtrxfd_open(struct inode *inode, struct file *filp)
 
 	spin_lock_irqsave(&dev->slock, flags);
 	if ((dev->locked_msk & XTRX_BLK_CHAR_DEV) == 0) {
+
 		dev->locked_msk |= XTRX_BLK_CHAR_DEV;
-		granted = 1; 
+		granted = 1;
 	}
 	spin_unlock_irqrestore(&dev->slock, flags);
 
@@ -824,6 +826,11 @@ static int xtrxfd_release(struct inode *inode, struct file *filp)
 {
 	struct xtrx_dev *xtrxdev = filp->private_data;
 	unsigned long flags;
+
+	if (xtrxdev->valid == 0) {
+		printk(KERN_INFO PFX "XTRX:%d dev is invalid!\n", xtrxdev->devno);
+		return 0;
+	}
 
 	xtrx_power_op(xtrxdev, 0, XTRX_BLK_CHAR_DEV);
 
@@ -1192,7 +1199,7 @@ static int xtrx_probe(struct pci_dev *pdev,
 	xtrxdev->gps_ctrl_state = 0;
 	xtrxdev->sim_ctrl_state = 0;
 	xtrxdev->pwr_msk = 0;
-
+	xtrxdev->valid = 0;
 	spin_lock_init(&xtrxdev->slock);
 
 	xtrxdev->shared_mmap = (char*)get_zeroed_page(GFP_KERNEL);
@@ -1313,12 +1320,7 @@ static int xtrx_probe(struct pci_dev *pdev,
 		goto err_uart;
 	}
 
-	err = xtrx_setup_cdev(xtrxdev);
-	if (err) {
-		printk(KERN_NOTICE PFX "Error %d initializing cdev\n", err);
-		goto failed_cdev;
-	}
-
+	xtrxdev->valid = 1;
 	xtrxdev->cdevice = device_create(xtrx_class,
 					 &pdev->dev,
 					 MKDEV(MAJOR(dev_first), MINOR(dev_first) + devices),
@@ -1327,19 +1329,24 @@ static int xtrx_probe(struct pci_dev *pdev,
 					 devices);
 	if (IS_ERR(xtrxdev->cdevice)) {
 		printk(KERN_NOTICE PFX "Unable to register device class\n");
-		goto failed_class;
+		goto failed_device;
 	}
 
-
+	err = xtrx_setup_cdev(xtrxdev);
+	if (err) {
+		printk(KERN_NOTICE PFX "Error %d initializing cdev\n", err);
+		goto failed_cdev;
+	}
 
 	devices++;
 	xtrxdev->next = xtrx_list;
 	xtrx_list = xtrxdev;
 	return 0;
 
-failed_class:
-	cdev_del(&xtrxdev->cdev);
+	//cdev_del(&xtrxdev->cdev);
 failed_cdev:
+	device_destroy(xtrx_class, MKDEV(MAJOR(dev_first), MINOR(dev_first) + devices));
+failed_device:
 	xtrx_uart_deinit(xtrxdev);
 err_uart:
 	xtrx_freedma_tx(xtrxdev);
@@ -1399,9 +1406,9 @@ static void xtrx_remove(struct pci_dev *pdev)
 	/* Clear pending interrupts */
 	xtrx_readl(xtrxdev, GP_PORT_RD_INTERRUPTS);
 
+	cdev_del(&xtrxdev->cdev);
 	device_destroy(xtrx_class, MKDEV(MAJOR(dev_first), MINOR(xtrxdev->devno)));
 
-	cdev_del(&xtrxdev->cdev);
 	xtrx_uart_deinit(xtrxdev);
 
 	if (xtrxdev->inttype == XTRX_LEGACY) {
@@ -1421,6 +1428,8 @@ static void xtrx_remove(struct pci_dev *pdev)
 	if (xtrxdev->pps) {
 		pps_unregister_source(xtrxdev->pps);
 	}
+
+	xtrxdev->valid = 0;
 
 	pci_iounmap(pdev, xtrxdev->bar1_addr);
 	pci_iounmap(pdev, xtrxdev->bar0_addr);
