@@ -45,11 +45,6 @@
 #include <asm/uaccess.h>
 #include <asm/atomic.h>
 
-#if defined(__arm__) || defined(__aarch64__)
-/* FIXME: rewrite this code in modern api */
-#define bus_to_virt(x) phys_to_virt(x)
-#endif
-
 #include "xtrx_defs.h"
 
 #define localparam static const uint32_t
@@ -1047,7 +1042,7 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		if ((vma->vm_end - vma->vm_start) != (1 << PAGE_SHIFT)) {
 			return -EINVAL;
 		}
-		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+		//vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 		vma->vm_flags |= VM_LOCKED;
 
 		if (remap_pfn_range(vma, vma->vm_start,
@@ -1060,15 +1055,15 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		xtrxfd_vma_open(vma);
 		return 0;
 	} else if (region == REGION_CTRL || region == REGION_TX_DEVMEM) {
-		resource_size_t addr;
-		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+		unsigned long pfn;
+		int bar = (region == REGION_CTRL) ? 0 : 1;
+		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 		vma->vm_flags |= VM_IO;
-		addr = pci_resource_start(xtrxdev->pdev, (region == REGION_CTRL) ? 0 : 1);
+		pfn = pci_resource_start(xtrxdev->pdev, bar) >> PAGE_SHIFT;
 
-		if (io_remap_pfn_range(vma, vma->vm_start,
-			virt_to_phys(bus_to_virt(addr)) >> PAGE_SHIFT,
-			vma->vm_end - vma->vm_start,
-			vma->vm_page_prot))
+		if (io_remap_pfn_range(vma, vma->vm_start, pfn,
+					vma->vm_end - vma->vm_start,
+					vma->vm_page_prot))
 			return -EAGAIN;
 
 		vma->vm_ops = &xtrxfd_remap_vm_ops;
@@ -1150,8 +1145,8 @@ static int xtrx_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
-	if (pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
-		dev_err(&pdev->dev,"No suitable DMA available.\n");
+	if (pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32))) {
+		dev_err(&pdev->dev,"No suitable consistent DMA available.\n");
 		goto err_disable_pdev;
 	}
 
