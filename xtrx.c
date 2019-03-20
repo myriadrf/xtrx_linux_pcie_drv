@@ -173,6 +173,14 @@ MODULE_DESCRIPTION("XTRX low-level PCIe driver");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("0.1");
 
+/* Some ARM platform pci_alloc_consistent() reports VA that can't be
+ * mmaped to userspce. Convertion DMA->PA->VA does the trick on that
+ * platforms
+ */
+#ifdef CONFIG_CPU_RK3399
+#define VA_DMA_ADDR_FIXUP
+#endif
+
 
 static void xtrx_writel(struct xtrx_dev *dev, unsigned int off, unsigned int value)
 {
@@ -1086,7 +1094,13 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		vma->vm_flags |= VM_LOCKED;
 
 		for (i = 0, off = 0; i < BUFS; ++i, off += bufsize) {
-			pfn = page_to_pfn(virt_to_page(pbufs[i].virt));
+#ifdef VA_DMA_ADDR_FIXUP
+			void *va = phys_to_virt(dma_to_phys(&xtrxdev->pdev->dev, pbufs[i].phys));
+#else
+			void *va = pbufs[i].virt;
+#endif
+			pfn = page_to_pfn(virt_to_page(va));
+
 			ret = remap_pfn_range(vma, vma->vm_start + off,
 						pfn,
 						bufsize,
@@ -1131,6 +1145,9 @@ static int xtrx_probe(struct pci_dev *pdev,
 	unsigned xtrx_no = devices;
 
 	printk(KERN_INFO PFX "Initializing %s\n", pci_name(pdev));
+#ifdef VA_DMA_ADDR_FIXUP
+	printk(KERN_INFO PFX "Buggy va/dma mapping on the platform! Fixup enabled\n");
+#endif
 
 	err = pci_enable_device(pdev);
 	if (err) {
