@@ -524,16 +524,10 @@ static struct uart_ops xtrx_uart_ops = {
 	//.ioctl          = xtrx_uart_verify_ioctl,
 };
 
-
-// TODO get rid of constant
-#define TTY_XTRX_MAJOR 234
-
 static struct uart_driver xtrx_uart_driver = {
 	.owner		= THIS_MODULE,
 	.driver_name	= "xtrxuart",
 	.dev_name	= "ttyXTRX",
-	.major		= TTY_XTRX_MAJOR,
-	.minor		= 64,
 	.nr		= XTRX_UART_NUM * MAX_XTRX_DEVS,
 	.cons		= NULL,
 };
