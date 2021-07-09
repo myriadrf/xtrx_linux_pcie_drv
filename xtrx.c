@@ -1191,8 +1191,8 @@ static int xtrx_probe(struct pci_dev *pdev,
 	}
 
 	bar1_addr = pci_iomap(pdev, 1,  1 << 16);
-	if (!bar0_addr) {
-		dev_err(&pdev->dev, "Failed to map BAR 0.\n");
+	if (!bar1_addr) {
+		dev_err(&pdev->dev, "Failed to map BAR 1.\n");
 		goto err_unmap0;
 	}
 
