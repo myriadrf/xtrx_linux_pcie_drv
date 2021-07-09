@@ -1509,7 +1509,6 @@ static int __init xtrx_init(void)
 	return 0;
 
 failed_pci:
-	class_unregister(xtrx_class);
 	class_destroy(xtrx_class);
 failed_setup_cdev:
 	unregister_chrdev_region(dev_first, devices);
@@ -1526,7 +1525,6 @@ static void __exit xtrx_cleanup(void)
 
 	pci_unregister_driver(&xtrx_driver);
 
-	class_unregister(xtrx_class);
 	class_destroy(xtrx_class);
 
 	unregister_chrdev_region(dev_first, devices);
