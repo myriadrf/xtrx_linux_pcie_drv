@@ -621,11 +621,19 @@ static int xtrx_allocdma(struct xtrx_dev *d, struct xtrx_dmabuf_nfo *pbufs, unsi
 {
 	int i;
 	for (i = 0; i < BUFS; i++) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
 		pbufs[i].virt = pci_alloc_consistent(d->pdev, buflen, &pbufs[i].phys);
+#else
+		pbufs[i].virt = dma_alloc_coherent(&d->pdev->dev, buflen, &pbufs[i].phys, GFP_KERNEL);
+#endif
 		if (!pbufs[i].virt) {
 			printk(KERN_INFO PFX "Failed to allocate %d DMA buffer", i);
 			for (; i >= 0; --i) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
 				pci_free_consistent(d->pdev, buflen, pbufs[i].virt, pbufs[i].phys);
+#else
+				dma_free_coherent(&d->pdev->dev, buflen, pbufs[i].virt, pbufs[i].phys);
+#endif
 			}
 			return -1;
 		}
@@ -666,7 +674,11 @@ static void xtrx_freedma_rx(struct xtrx_dev *d)
 {
 	int i;
 	for (i = 0; i < BUFS; i++) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
 		pci_free_consistent(d->pdev, d->buf_rx_size, d->buf_rx[i].virt, d->buf_rx[i].phys);
+#else
+		dma_free_coherent(&d->pdev->dev, d->buf_rx_size, d->buf_rx[i].virt, d->buf_rx[i].phys);
+#endif
 	}
 	d->buf_rx_size = 0;
 }
@@ -675,7 +687,11 @@ static void xtrx_freedma_tx(struct xtrx_dev *d)
 {
 	int i;
 	for (i = 0; i < BUFS; i++) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
 		pci_free_consistent(d->pdev, d->buf_tx_size, d->buf_tx[i].virt, d->buf_tx[i].phys);
+#else
+		dma_free_coherent(&d->pdev->dev, d->buf_tx_size, d->buf_tx[i].virt, d->buf_tx[i].phys);
+#endif
 	}
 	d->buf_tx_size = 0;
 }
@@ -1162,7 +1178,11 @@ static int xtrx_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
 	if (pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32))) {
+#else
+	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32))) {
+#endif
 		dev_err(&pdev->dev,"No suitable consistent DMA available.\n");
 		goto err_disable_pdev;
 	}
