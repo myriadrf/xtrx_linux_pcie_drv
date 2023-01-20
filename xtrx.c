@@ -361,8 +361,13 @@ static void xtrx_uart_shutdown(struct uart_port *port)
 }
 
 static void xtrx_uart_set_termios(struct uart_port *port,
-				 struct ktermios *new,
-				 struct ktermios *old)
+				  struct ktermios *new,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+				  struct ktermios *old
+#else
+				  const struct ktermios *old
+#endif
+	)
 {
 	unsigned long flags;
 
