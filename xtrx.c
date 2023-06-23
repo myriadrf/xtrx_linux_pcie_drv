@@ -1072,7 +1072,11 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 			return -EINVAL;
 		}
 		//vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 		vma->vm_flags |= VM_LOCKED;
+#else
+		vm_flags_set(vma, VM_LOCKED);
+#endif
 
 		if (remap_pfn_range(vma, vma->vm_start,
 							virt_to_phys((void*)((unsigned long)xtrxdev->shared_mmap)) >> PAGE_SHIFT,
@@ -1087,7 +1091,11 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		unsigned long pfn;
 		int bar = (region == REGION_CTRL) ? 0 : 1;
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 		vma->vm_flags |= VM_IO;
+#else
+		vm_flags_set(vma, VM_IO);
+#endif
 		pfn = pci_resource_start(xtrxdev->pdev, bar) >> PAGE_SHIFT;
 
 		if (io_remap_pfn_range(vma, vma->vm_start, pfn,
@@ -1112,7 +1120,11 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		}
 
 		//vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 		vma->vm_flags |= VM_LOCKED;
+#else
+		vm_flags_set(vma, VM_LOCKED);
+#endif
 
 		for (i = 0, off = 0; i < BUFS; ++i, off += bufsize) {
 #ifdef VA_DMA_ADDR_FIXUP
