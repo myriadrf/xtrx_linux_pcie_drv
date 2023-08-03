@@ -1067,7 +1067,7 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 			return -EINVAL;
 		}
 		//vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-		vma->vm_flags |= VM_LOCKED;
+		vm_flags_set(vma, VM_LOCKED);
 
 		if (remap_pfn_range(vma, vma->vm_start,
 							virt_to_phys((void*)((unsigned long)xtrxdev->shared_mmap)) >> PAGE_SHIFT,
@@ -1082,7 +1082,7 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		unsigned long pfn;
 		int bar = (region == REGION_CTRL) ? 0 : 1;
 		vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
-		vma->vm_flags |= VM_IO;
+		vm_flags_set(vma, VM_IO);
 		pfn = pci_resource_start(xtrxdev->pdev, bar) >> PAGE_SHIFT;
 
 		if (io_remap_pfn_range(vma, vma->vm_start, pfn,
@@ -1107,7 +1107,7 @@ static int xtrxfd_mmap(struct file *filp, struct vm_area_struct *vma)
 		}
 
 		//vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-		vma->vm_flags |= VM_LOCKED;
+		vm_flags_set(vma, VM_LOCKED);
 
 		for (i = 0, off = 0; i < BUFS; ++i, off += bufsize) {
 #ifdef VA_DMA_ADDR_FIXUP
