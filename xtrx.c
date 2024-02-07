@@ -1526,7 +1526,12 @@ static int __init xtrx_init(void)
 		goto failed_chrdev;
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
 	xtrx_class = class_create(THIS_MODULE, CLASS_NAME);
+#else
+	xtrx_class = class_create(CLASS_NAME);
+#endif
+
 	if (IS_ERR(xtrx_class)) {
 		printk(KERN_NOTICE PFX "Unable to register xtrx class\n");
 		goto failed_setup_cdev;
