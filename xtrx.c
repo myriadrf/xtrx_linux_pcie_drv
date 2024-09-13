@@ -35,6 +35,7 @@
 #include <linux/serial.h>
 #include <linux/serial_core.h>
 #include <linux/serial_reg.h>
+#include <linux/kfifo.h>
 #include <linux/device.h>
 #include <linux/time.h>
 #include <linux/pps_kernel.h>
@@ -451,7 +452,11 @@ void xtrx_uart_do_rx(struct uart_port *port, unsigned* fifo_used)
 
 static void xtrx_uart_do_tx(struct uart_port *port, unsigned fifo_used)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 	struct circ_buf *xmit;
+#else
+	struct tty_port *tport;
+#endif
 	unsigned int max_count;
 	struct xtrx_dev *dev = xtrx_dev_from_uart_port(port);
 
@@ -469,29 +474,53 @@ static void xtrx_uart_do_tx(struct uart_port *port, unsigned fifo_used)
 		return;
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 	xmit = &port->state->xmit;
 	if (uart_circ_empty(xmit))
 		goto txq_empty;
+#else
+	tport = &port->state->port;
+	if (kfifo_is_empty(&tport->xmit_fifo))
+		goto txq_empty;
+#endif
 
 	max_count = port->fifosize - fifo_used;
 	while (max_count--) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		unsigned int c;
 
 		c = xmit->buf[xmit->tail] & 0xff;
 		//printk(KERN_NOTICE PFX "Char: %x\n", c);
+#else
+		unsigned char c;
+
+		if (kfifo_is_empty(&tport->xmit_fifo) || kfifo_get(&tport->xmit_fifo, &c) == 0)
+			break;
+#endif
 		xtrx_writel(dev, (port->line % XTRX_UART_NUM == XTRX_UART_LINE_GPS) ?
-				    GP_PORT_WR_UART_TX : GP_PORT_WR_SIM_TX, c);
+					GP_PORT_WR_UART_TX : GP_PORT_WR_SIM_TX, c);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
 		port->icount.tx++;
 		if (uart_circ_empty(xmit))
 			break;
+#endif
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
 
 	if (uart_circ_empty(xmit))
 		goto txq_empty;
+#else
+	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
+		uart_write_wakeup(port);
+
+	if (kfifo_is_empty(&tport->xmit_fifo))
+		goto txq_empty;
+#endif
 	return;
 
 txq_empty:
