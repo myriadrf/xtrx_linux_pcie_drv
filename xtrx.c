@@ -178,7 +178,8 @@ MODULE_VERSION("0.1");
  * mmaped to userspce. Convertion DMA->PA->VA does the trick on that
  * platforms
  */
-#ifdef CONFIG_CPU_RK3399
+
+#if defined(__arm__) || defined(__aarch64__)
 #define VA_DMA_ADDR_FIXUP
 #endif
 
