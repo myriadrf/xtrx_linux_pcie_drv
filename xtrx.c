@@ -624,7 +624,7 @@ static int xtrx_allocdma(struct xtrx_dev *d, struct xtrx_dmabuf_nfo *pbufs, unsi
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
 		pbufs[i].virt = pci_alloc_consistent(d->pdev, buflen, &pbufs[i].phys);
 #else
-		pbufs[i].virt = dma_alloc_coherent(&d->pdev->dev, buflen, &pbufs[i].phys, GFP_KERNEL);
+		pbufs[i].virt = dmam_alloc_coherent(&d->pdev->dev, buflen, &pbufs[i].phys, GFP_KERNEL);
 #endif
 		if (!pbufs[i].virt) {
 			printk(KERN_INFO PFX "Failed to allocate %d DMA buffer", i);
